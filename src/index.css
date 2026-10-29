@@ -1,0 +1,30 @@
+.app-shell {
+  min-height: 100svh;
+  min-height: 100dvh;
+  background-color: #f2f6f7;
+  background-image:
+    radial-gradient(ellipse at 8% 10%, rgba(190, 211, 207, 0.3), transparent 34%),
+    radial-gradient(ellipse at 92% 88%, rgba(215, 199, 159, 0.18), transparent 30%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+#root {
+  min-height: 100svh;
+}
