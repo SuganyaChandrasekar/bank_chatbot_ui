@@ -22,8 +22,78 @@ const statusLabels = {
 const suggestedTasks = [
   { label: 'Check my balance', icon: <AccountBalanceWalletOutlinedIcon />, prompt: 'Can you help me check my account balance?' },
   { label: 'Review a transaction', icon: <ReceiptLongOutlinedIcon />, prompt: 'I have a question about a recent transaction.' },
-  { label: 'Manage my card', icon: <CreditCardOutlinedIcon />, prompt: 'I need help managing my bank card.' },
+  { label: 'Manage my card', icon: <CreditCardOutlinedIcon />, prompt: 'I want to freeze my debit card.' },
 ]
+
+function isCardFreezeRequest(content) {
+  return /\b(freeze|block|lock)\b/i.test(content) && /\b(card|debit|credit)\b/i.test(content)
+}
+
+function CardFreezeActions({ message, onSubmitCardFreeze }) {
+  const [selectedCardId, setSelectedCardId] = useState('')
+  const [otp, setOtp] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const activeCards = message.cards.filter((card) => card.status === 'active')
+  const selectedCard = activeCards.find((card) => card.card_id === selectedCardId)
+
+  const runAction = async () => {
+    if (!selectedCard || otp.length !== 6) return
+    setBusy(true)
+    setError('')
+    try {
+      await onSubmitCardFreeze(message, selectedCard, otp)
+      setOtp('')
+    } catch (actionError) {
+      setError(actionError.message)
+      setOtp('')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (message.complete) return null
+
+  return (
+    <Stack spacing={1.25} sx={{ mt: 1.5, alignItems: 'flex-start' }}>
+      {message.cards.map((card) => (
+        <Button
+          key={card.card_id}
+          variant={selectedCardId === card.card_id ? 'contained' : 'outlined'}
+          disabled={busy || card.status !== 'active'}
+          onClick={() => {
+            setSelectedCardId(card.card_id)
+            setOtp('')
+            setError('')
+          }}
+          sx={{ whiteSpace: 'normal', textAlign: 'left' }}
+        >
+          {card.name} ···· {card.last_4} ({card.status})
+        </Button>
+      ))}
+      {selectedCard ? (
+        <>
+          <Typography variant="caption" color="text.secondary">
+            Enter your one-time code here. It will not be sent in chat.
+          </Typography>
+          <TextField
+            type="password"
+            label="6-digit verification code"
+            value={otp}
+            onChange={(event) => setOtp(event.target.value.replace(/\D/g, '').slice(0, 6))}
+            slotProps={{ htmlInput: { inputMode: 'numeric', maxLength: 6, 'aria-label': '6-digit verification code' } }}
+            disabled={busy}
+            size="small"
+          />
+          <Button variant="contained" disabled={busy || otp.length !== 6} onClick={runAction}>
+            Verify and freeze card
+          </Button>
+        </>
+      ) : null}
+      {error ? <Typography role="alert" variant="caption" color="error">{error}</Typography> : null}
+    </Stack>
+  )
+}
 
 function TransferActions({ message, onSubmitTransfer }) {
   const [otp, setOtp] = useState('')
@@ -76,6 +146,7 @@ export default function ChatWindow({ url = import.meta.env.VITE_CHAT_WS_URL, sse
   const [draft, setDraft] = useState('')
   const [sessionBusy, setSessionBusy] = useState(false)
   const [sessionError, setSessionError] = useState('')
+  const [cardLookupBusy, setCardLookupBusy] = useState(false)
   const conversationRef = useRef(null)
   const { userId, startSandboxSession, endSandboxSession, setRealtimeOnline } = useAuth()
   const {
@@ -85,6 +156,9 @@ export default function ChatWindow({ url = import.meta.env.VITE_CHAT_WS_URL, sse
     currentResponse,
     isStreaming,
     sendMessage,
+    appendLocalMessage,
+    getSandboxCards,
+    submitCardFreeze,
     submitTransfer,
   } = useChatStream(url, { enabled: Boolean(userId), onConnectionChange: setRealtimeOnline, sseUrl })
   useEffect(() => {
@@ -106,21 +180,53 @@ export default function ChatWindow({ url = import.meta.env.VITE_CHAT_WS_URL, sse
       setSessionBusy(false)
     }
   }
+  const handleCardFreezeRequest = async (requestText) => {
+    appendLocalMessage({ role: 'user', content: requestText.trim() })
+    setCardLookupBusy(true)
+    try {
+      const cards = await getSandboxCards()
+      appendLocalMessage({
+        role: 'assistant',
+        type: 'card_freeze',
+        cardActionId: crypto.randomUUID(),
+        content: cards.length
+          ? 'Choose the card to freeze. Standard verification is required.'
+          : 'No cards are available for this sandbox user.',
+        cards,
+      })
+    } catch (error) {
+      appendLocalMessage({
+        role: 'assistant',
+        content: error.message || 'Card information is currently unavailable.',
+      })
+    } finally {
+      setCardLookupBusy(false)
+    }
+  }
   const handleSubmit = (event) => {
     event.preventDefault()
+    if (isCardFreezeRequest(draft)) {
+      setDraft('')
+      void handleCardFreezeRequest(draft)
+      return
+    }
     if (sendMessage(draft)) setDraft('')
   }
 
   const handleComposerKeyDown = (event) => {
     if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
     event.preventDefault()
-    if (draft.trim() && !isStreaming) {
+    if (draft.trim() && !isStreaming && !cardLookupBusy) {
       event.currentTarget.closest('form')?.requestSubmit()
       setDraft('')
     }
   }
 
   const handleSuggestion = (prompt) => {
+    if (isCardFreezeRequest(prompt)) {
+      void handleCardFreezeRequest(prompt)
+      return
+    }
     if (sendMessage(prompt)) setDraft('')
   }
 
@@ -221,6 +327,12 @@ export default function ChatWindow({ url = import.meta.env.VITE_CHAT_WS_URL, sse
                           />
                         </>
                       ) : null}
+                      {message.type === 'card_freeze' ? (
+                        <CardFreezeActions
+                          message={message}
+                          onSubmitCardFreeze={submitCardFreeze}
+                        />
+                      ) : null}
                     </Paper>
                   </Box>
                 ))}
@@ -237,9 +349,9 @@ export default function ChatWindow({ url = import.meta.env.VITE_CHAT_WS_URL, sse
 
           <Box component="form" onSubmit={handleSubmit} sx={{ px: { xs: 2, sm: 4 }, pt: 2, pb: { xs: 'max(14px, env(safe-area-inset-bottom))', sm: 2.25 }, borderTop: 1, borderColor: 'divider', bgcolor: 'background.paper' }}>
             <Stack direction="row" spacing={1} sx={{ maxWidth: 740, mx: 'auto', flexWrap: 'wrap', alignItems: 'flex-end' }}>
-              <TextField fullWidth multiline maxRows={4} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={userId ? 'Write a message...' : 'Start a sandbox session to chat'} slotProps={{ htmlInput: { 'aria-label': 'Message your banking assistant' } }} disabled={!userId || isStreaming} sx={{ flex: '1 1 220px', minWidth: 0, width: 'auto', '& .MuiOutlinedInput-root': { bgcolor: '#F7F9F9', borderRadius: 1.5 }, '& .MuiOutlinedInput-notchedOutline': { borderColor: 'divider' } }} />
-              <IconButton type="submit" disabled={!userId || !draft.trim() || isStreaming} aria-label="Send message" sx={{ width: 48, height: 48, flexShrink: 0, bgcolor: 'primary.main', color: 'primary.contrastText', borderRadius: 1.5, '&:hover': { bgcolor: 'primary.dark' }, '&.Mui-disabled': { bgcolor: '#E8EDEE', color: '#98A5A8' } }}>
-                {isStreaming ? <CircularProgress size={21} color="inherit" aria-label="Sending message" /> : <ArrowUpwardRoundedIcon aria-hidden="true" />}
+              <TextField fullWidth multiline maxRows={4} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={userId ? 'Write a message...' : 'Start a sandbox session to chat'} slotProps={{ htmlInput: { 'aria-label': 'Message your banking assistant' } }} disabled={!userId || isStreaming || cardLookupBusy} sx={{ flex: '1 1 220px', minWidth: 0, width: 'auto', '& .MuiOutlinedInput-root': { bgcolor: '#F7F9F9', borderRadius: 1.5 }, '& .MuiOutlinedInput-notchedOutline': { borderColor: 'divider' } }} />
+              <IconButton type="submit" disabled={!userId || !draft.trim() || isStreaming || cardLookupBusy} aria-label="Send message" sx={{ width: 48, height: 48, flexShrink: 0, bgcolor: 'primary.main', color: 'primary.contrastText', borderRadius: 1.5, '&:hover': { bgcolor: 'primary.dark' }, '&.Mui-disabled': { bgcolor: '#E8EDEE', color: '#98A5A8' } }}>
+                {isStreaming || cardLookupBusy ? <CircularProgress size={21} color="inherit" aria-label="Sending message" /> : <ArrowUpwardRoundedIcon aria-hidden="true" />}
               </IconButton>
             </Stack>
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', textAlign: 'center', mt: 1.25 }}>

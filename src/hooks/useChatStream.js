@@ -255,6 +255,49 @@ export default function useChatStream(
     return false
   }, [enabled, maskSensitiveText, sseUrl, streamSseMessage])
 
+  const appendLocalMessage = useCallback((message) => {
+    setMessages((current) => [...current, message])
+  }, [])
+
+  const getSandboxCards = useCallback(async () => {
+    const apiUrl = (import.meta.env.VITE_CHAT_API_URL || 'http://localhost:8000').replace(/\/$/, '')
+    const response = await fetch(`${apiUrl}/sandbox/cards`, {
+      credentials: 'include',
+    })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.detail || 'Card information is unavailable.')
+    return result
+  }, [])
+
+  const submitCardFreeze = useCallback(async (message, card, otp) => {
+    const apiUrl = (import.meta.env.VITE_CHAT_API_URL || 'http://localhost:8000').replace(/\/$/, '')
+    const response = await fetch(
+      `${apiUrl}/sandbox/cards/${encodeURIComponent(card.card_id)}/freeze`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ otp_code: otp }),
+      },
+    )
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.detail || 'This card action could not be completed.')
+
+    setMessages((current) => current.map((entry) => (
+      entry.type === 'card_freeze' && entry.cardActionId === message.cardActionId
+        ? {
+            ...entry,
+            content: result.message,
+            complete: true,
+            cards: entry.cards.map((item) => (
+              item.card_id === result.card_id ? { ...item, status: result.status } : item
+            )),
+          }
+        : entry
+    )))
+    return result
+  }, [])
+
   const updateTransfer = useCallback((requestId, result) => {
     setMessages((current) => current.map((message) => (
       message.type === 'transfer' && message.transactionId === requestId
@@ -316,6 +359,9 @@ export default function useChatStream(
     connect,
     disconnect,
     sendMessage,
+    appendLocalMessage,
+    getSandboxCards,
+    submitCardFreeze,
     submitTransfer,
   }
 }
