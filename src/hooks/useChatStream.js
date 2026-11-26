@@ -19,7 +19,12 @@ function parseSsePayload(frame) {
 
 export default function useChatStream(
   url,
-  { enabled = true, onConnectionChange, sseUrl = import.meta.env.VITE_CHAT_SSE_URL } = {},
+  {
+    enabled = true,
+    onConnectionChange,
+    onActivity,
+    sseUrl = import.meta.env.VITE_CHAT_SSE_URL,
+  } = {},
 ) {
   const socketRef = useRef(null)
   const sseAbortRef = useRef(null)
@@ -43,6 +48,7 @@ export default function useChatStream(
   const processPayload = useCallback((payload) => {
     if (typeof payload.thread_id === 'string') threadIdRef.current = payload.thread_id
     if (payload.type === 'completion' || payload.type === 'complete' || payload.done) {
+      onActivity?.()
       const completedResponse = responseRef.current
       if (completedResponse) {
         setMessages((current) => [...current, { role: 'assistant', content: completedResponse }])
@@ -129,7 +135,7 @@ export default function useChatStream(
       })
       setIsStreaming(true)
     }
-  }, [])
+  }, [onActivity])
 
   const fallbackToSse = useCallback(() => {
     if (!sseUrl || fallbackAttemptedRef.current || manualDisconnectRef.current) return false
@@ -212,10 +218,6 @@ export default function useChatStream(
   }, [processPayload, sseUrl, updateConnectionState])
 
   useEffect(() => {
-    if (!enabled) threadIdRef.current = null
-  }, [enabled])
-
-  useEffect(() => {
     if (enabled) connect()
     return () => {
       manualDisconnectRef.current = true
@@ -242,18 +244,20 @@ export default function useChatStream(
         ...(accountChoice === undefined ? {} : { account_choice: accountChoice }),
       }))
       appendUserMessage()
+      onActivity?.()
       setIsStreaming(true)
       return true
     }
 
     if (enabled && transportRef.current === 'sse' && sseUrl) {
       appendUserMessage()
+      onActivity?.()
       streamSseMessage(maskedContent, accountChoice)
       return true
     }
 
     return false
-  }, [enabled, maskSensitiveText, sseUrl, streamSseMessage])
+  }, [enabled, maskSensitiveText, onActivity, sseUrl, streamSseMessage])
 
   const appendLocalMessage = useCallback((message) => {
     setMessages((current) => [...current, message])
@@ -348,7 +352,17 @@ export default function useChatStream(
     socketRef.current?.close()
     sseAbortRef.current?.abort()
     socketRef.current = null
-  }, [])
+    sseAbortRef.current = null
+    threadIdRef.current = null
+    responseRef.current = ''
+    fallbackAttemptedRef.current = false
+    transportRef.current = url ? 'websocket' : 'sse'
+    setTransport(url ? 'websocket' : 'sse')
+    setMessages([])
+    setCurrentResponse('')
+    setIsStreaming(false)
+    updateConnectionState('closed')
+  }, [url, updateConnectionState])
 
   return {
     connectionState,

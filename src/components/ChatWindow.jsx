@@ -6,7 +6,7 @@ import LockOutlinedIcon from '@mui/icons-material/LockOutlined'
 import ReceiptLongOutlinedIcon from '@mui/icons-material/ReceiptLongOutlined'
 import ShieldOutlinedIcon from '@mui/icons-material/ShieldOutlined'
 import SupportAgentRoundedIcon from '@mui/icons-material/SupportAgentRounded'
-import { Alert, Avatar, Box, Button, CircularProgress, Container, IconButton, Paper, Stack, TextField, Typography } from '@mui/material'
+import { Alert, Avatar, Box, Button, Chip, CircularProgress, Container, IconButton, Paper, Stack, TextField, Typography } from '@mui/material'
 import { useAuth } from '../context/AuthContext'
 import useChatStream from '../hooks/useChatStream'
 
@@ -27,6 +27,12 @@ const suggestedTasks = [
 
 function isCardFreezeRequest(content) {
   return /\b(freeze|block|lock)\b/i.test(content) && /\b(card|debit|credit)\b/i.test(content)
+}
+
+function formatSessionCountdown(seconds) {
+  const minutes = Math.floor(seconds / 60).toString().padStart(2, '0')
+  const remainder = (seconds % 60).toString().padStart(2, '0')
+  return `${minutes}:${remainder}`
 }
 
 function CardFreezeActions({ message, onSubmitCardFreeze }) {
@@ -146,21 +152,78 @@ export default function ChatWindow({ url = import.meta.env.VITE_CHAT_WS_URL, sse
   const [draft, setDraft] = useState('')
   const [sessionBusy, setSessionBusy] = useState(false)
   const [sessionError, setSessionError] = useState('')
+  const [clockNow, setClockNow] = useState(null)
   const [cardLookupBusy, setCardLookupBusy] = useState(false)
   const conversationRef = useRef(null)
-  const { userId, startSandboxSession, endSandboxSession, setRealtimeOnline } = useAuth()
+  const {
+    userId,
+    lastActivityAt,
+    idleTimeoutSeconds,
+    startSandboxSession,
+    endSandboxSession,
+    recordSessionActivity,
+    setRealtimeOnline,
+  } = useAuth()
   const {
     connectionState,
     transport,
     messages,
     currentResponse,
     isStreaming,
+    disconnect,
     sendMessage,
     appendLocalMessage,
     getSandboxCards,
     submitCardFreeze,
     submitTransfer,
-  } = useChatStream(url, { enabled: Boolean(userId), onConnectionChange: setRealtimeOnline, sseUrl })
+  } = useChatStream(url, {
+    enabled: Boolean(userId),
+    onConnectionChange: setRealtimeOnline,
+    onActivity: recordSessionActivity,
+    sseUrl,
+  })
+
+  const sessionSecondsLeft = userId && lastActivityAt && idleTimeoutSeconds
+    ? Math.max(
+        0,
+        Math.min(
+          idleTimeoutSeconds,
+          Math.ceil(
+            (lastActivityAt + idleTimeoutSeconds * 1000 - (clockNow ?? lastActivityAt)) / 1000,
+          ),
+        ),
+      )
+    : null
+
+  useEffect(() => {
+    if (!userId || !lastActivityAt || !idleTimeoutSeconds) {
+      return undefined
+    }
+
+    let expirationStarted = false
+    const updateCountdown = () => {
+      const now = Date.now()
+      const secondsLeft = Math.max(
+        0,
+        Math.ceil((lastActivityAt + idleTimeoutSeconds * 1000 - now) / 1000),
+      )
+      setClockNow(now)
+      if (secondsLeft === 0 && !expirationStarted) {
+        expirationStarted = true
+        setSessionError(
+          `Sandbox session expired after ${Math.ceil(idleTimeoutSeconds / 60)} minutes of inactivity. Sign in again.`,
+        )
+        disconnect()
+        void endSandboxSession().catch(() => {
+          setSessionError('Sandbox session expired. Sign in again.')
+        })
+      }
+    }
+
+    const timer = window.setInterval(updateCountdown, 1000)
+    return () => window.clearInterval(timer)
+  }, [userId, lastActivityAt, idleTimeoutSeconds, disconnect, endSandboxSession])
+
   useEffect(() => {
     const conversation = conversationRef.current
     if (conversation) conversation.scrollTop = conversation.scrollHeight
@@ -170,8 +233,12 @@ export default function ChatWindow({ url = import.meta.env.VITE_CHAT_WS_URL, sse
     setSessionBusy(true)
     setSessionError('')
     try {
-      if (userId) await endSandboxSession()
-      else await startSandboxSession()
+      if (userId) {
+        disconnect()
+        await endSandboxSession()
+      } else {
+        await startSandboxSession()
+      }
     } catch (error) {
       setSessionError(error.name === 'TimeoutError'
         ? 'Sandbox sign-in timed out. Make sure the local orchestrator is running, then try again.'
@@ -244,6 +311,23 @@ export default function ChatWindow({ url = import.meta.env.VITE_CHAT_WS_URL, sse
             </Box>
           </Stack>
           <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+            {userId && sessionSecondsLeft > 0 ? (
+              <Chip
+                size="medium"
+                label={`Active · ${formatSessionCountdown(sessionSecondsLeft)}`}
+                aria-label={`Sandbox session active, ${formatSessionCountdown(sessionSecondsLeft)} remaining`}
+                sx={{
+                  height: 32,
+                  bgcolor: '#EAF3FF',
+                  color: '#1565C0',
+                  border: '1px solid #90CAF9',
+                  fontSize: '0.875rem',
+                  fontWeight: 700,
+                  fontVariantNumeric: 'tabular-nums',
+                  '& .MuiChip-label': { px: 1.5 },
+                }}
+              />
+            ) : null}
             <Button size="small" variant={userId ? 'text' : 'outlined'} onClick={handleSandboxSession} disabled={sessionBusy} sx={{ whiteSpace: 'nowrap', minWidth: 0 }}>
               {sessionBusy ? 'Please wait' : userId ? 'End sandbox session' : 'Sandbox login'}
             </Button>
@@ -293,7 +377,7 @@ export default function ChatWindow({ url = import.meta.env.VITE_CHAT_WS_URL, sse
               <Stack spacing={2.5} sx={{ maxWidth: 740, mx: 'auto' }}>
                 {messages.map((message, index) => (
                   <Box key={`${message.role}-${index}`} sx={{ alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start', maxWidth: { xs: '94%', sm: '82%' } }}>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.75, px: 0.5 }}>{message.role === 'user' ? 'You' : 'Northstar assistant'}</Typography>
+                    {message.role === 'user' ? <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.75, px: 0.5 }}>You</Typography> : null}
                     <Paper elevation={0} sx={{ p: 1.75, border: 1, borderColor: message.role === 'user' ? 'primary.main' : '#D9E3E2', borderRadius: 1.5, bgcolor: message.role === 'user' ? 'primary.main' : '#EAF1F0', color: message.role === 'user' ? 'primary.contrastText' : 'text.primary' }}>
                       <Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{message.content}</Typography>
                       {message.type === 'account_options' && message.accounts?.length ? (
@@ -338,11 +422,34 @@ export default function ChatWindow({ url = import.meta.env.VITE_CHAT_WS_URL, sse
                 ))}
                 {currentResponse ? (
                   <Box sx={{ alignSelf: 'flex-start', maxWidth: { xs: '94%', sm: '82%' } }}>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.75, px: 0.5 }}>Northstar assistant</Typography>
                     <Paper elevation={0} sx={{ p: 1.75, border: 1, borderColor: '#D9E3E2', borderRadius: 1.5, bgcolor: '#EAF1F0' }}><Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{currentResponse}</Typography></Paper>
                   </Box>
                 ) : null}
-                {isStreaming && !currentResponse ? <CircularProgress size={20} aria-label="Assistant is responding" sx={{ color: 'primary.main' }} /> : null}
+                {isStreaming && !currentResponse ? (
+                  <Box sx={{ alignSelf: 'flex-start', maxWidth: { xs: '94%', sm: '82%' } }}>
+                    <Paper
+                      elevation={0}
+                      sx={{
+                        p: 1.75,
+                        border: 1,
+                        borderColor: '#D9E3E2',
+                        borderRadius: 1.5,
+                        bgcolor: '#EAF1F0',
+                      }}
+                    >
+                      <Box
+                        role="status"
+                        aria-label="Assistant is typing"
+                        className="assistant-typing-indicator"
+                        sx={{ color: 'primary.main' }}
+                      >
+                        <span className="assistant-typing-indicator__dot" />
+                        <span className="assistant-typing-indicator__dot" />
+                        <span className="assistant-typing-indicator__dot" />
+                      </Box>
+                    </Paper>
+                  </Box>
+                ) : null}
               </Stack>
             )}
           </Box>
